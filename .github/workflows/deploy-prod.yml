@@ -1,0 +1,142 @@
+name: 🏹 Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+env:
+  NODE_VERSION: '20'
+  PNPM_VERSION: '8'
+  API_IMAGE: trandora/api
+  WEB_IMAGE: trandora/web
+
+jobs:
+  # ============================================
+  # Step 1: Full CI
+  # ============================================
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        env:
+          MONGO_INITDB_ROOT_USERNAME: trandora
+          MONGO_INITDB_ROOT_PASSWORD: trandora_ci
+          MONGO_INITDB_DATABASE: trandora_test
+        options: >-
+          --health-cmd "echo 'db.runCommand({ping:1})' | mongosh --quiet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm test
+        env:
+          MONGODB_URI: mongodb://trandora:trandora_ci@localhost:27017/trandora_test?authSource=admin
+          JWT_SECRET: ci-test-secret-key
+          NODE_ENV: test
+
+  # ============================================
+  # Step 2: Build & Push Production Images
+  # ============================================
+  docker-build:
+    name: Build Production Images
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🐳 Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 🏗️ Build & push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./infra/docker/Dockerfile.api
+          push: true
+          tags: |
+            ${{ env.API_IMAGE }}:latest
+            ${{ env.API_IMAGE }}:prod-${{ github.sha }}
+
+      - name: 🏗️ Build & push Web image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./infra/docker/Dockerfile.web
+          push: true
+          tags: |
+            ${{ env.WEB_IMAGE }}:latest
+            ${{ env.WEB_IMAGE }}:prod-${{ github.sha }}
+
+  # ============================================
+  # Step 3: Deploy to Production
+  # ============================================
+  deploy-production:
+    name: Deploy to Production
+    needs: docker-build
+    runs-on: ubuntu-latest
+    environment: production  # Requires manual approval in GitHub settings
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🏹 Deploy to production server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /opt/trandora
+
+            # Pull latest images
+            docker pull ${{ env.API_IMAGE }}:latest
+            docker pull ${{ env.WEB_IMAGE }}:latest
+
+            # Blue-green: start new containers alongside old ones
+            docker-compose -f docker-compose.prod.yml up -d --no-deps --scale api=2 api
+            sleep 15
+
+            # Health check new container
+            curl -f http://localhost:4000/api/v1/health || exit 1
+
+            # Scale down to 1 (remove old container)
+            docker-compose -f docker-compose.prod.yml up -d --no-deps --scale api=1 api
+
+            # Update web
+            docker-compose -f docker-compose.prod.yml up -d --no-deps web
+
+            # Final health check
+            sleep 5
+            curl -f http://localhost:3000 || exit 1
+            echo "🏹 Production deployment successful!"
+
+      - name: 📢 Production notification
+        if: always()
+        run: |
+          echo "🏹 PRODUCTION deployed: ${{ github.sha }}"
+          echo "   Status: ${{ job.status }}"
