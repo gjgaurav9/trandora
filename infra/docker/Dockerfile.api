@@ -9,9 +9,7 @@ WORKDIR /app
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml turbo.json ./
 COPY apps/api/package.json ./apps/api/
 COPY packages/types/package.json ./packages/types/
-COPY packages/utils/package.json ./packages/utils/
 COPY packages/config/package.json ./packages/config/
-COPY packages/fta-engine/package.json ./packages/fta-engine/
 RUN pnpm install --frozen-lockfile --prod=false
 
 # Stage 2: Build
