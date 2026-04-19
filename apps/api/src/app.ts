@@ -19,11 +19,14 @@ export async function buildApp() {
     },
   });
 
+  const corsOrigins = process.env.CORS_ORIGINS
+    ?.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   // Plugins
   await app.register(cors, {
-    origin: process.env.NODE_ENV === 'production'
-      ? ['https://trandora.ai', 'https://www.trandora.ai']
-      : true,
+    origin: process.env.NODE_ENV === 'production' ? corsOrigins ?? false : true,
     credentials: true,
   });
 
